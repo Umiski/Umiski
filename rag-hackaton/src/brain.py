@@ -39,3 +39,27 @@ def get_astro_answer(user_query):
     rag_chain = create_retrieval_chain(retriever, combine_docs_chain)
 
     return rag_chain.invoke({"input": user_query})["answer"]
+
+
+def quick_chat():
+    """Funkcja do interaktywnego testowania bota w konsoli."""
+    print("\n🚀 AstroGuide CLI Test Mode (wpisz 'exit' aby wyjść)")
+    print("-" * 50)
+
+    while True:
+        user_input = input("Ty: ")
+        if user_input.lower() in ["exit", "quit", "q"]:
+            break
+
+        try:
+            # Używamy modelu Flash 2.5 - jest darmowy i najszybszy
+            answer = get_astro_answer(user_input)
+            print(f"\nAstroGuide: {answer}\n")
+            print("-" * 20)
+        except Exception as e:
+            print(f"❌ Błąd: {e}")
+
+
+if __name__ == "__main__":
+    # To pozwoli na uruchomienie: python -m src.brain
+    quick_chat()
