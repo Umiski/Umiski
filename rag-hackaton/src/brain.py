@@ -5,7 +5,7 @@ import streamlit as st
 from langchain_chroma import Chroma
 from langchain_core.output_parsers import StrOutputParser  # Dodano dla czystego tekstu
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnableParallel, RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 
 from src.utils import get_config
@@ -53,88 +53,99 @@ def get_rag_chain():
     )
 
     # KLUCZOWA ZMIANA: Zapewniamy, że retriever dostaje tylko string (tekst pytania)
-    _CACHED_CHAIN = (
+    _CACHED_CHAIN = RunnableParallel(
         {
-            "context": itemgetter("question") | retriever | format_docs,
+            "context": itemgetter("question") | retriever,
             "question": itemgetter("question"),
         }
-        | prompt
-        | llm
-        | StrOutputParser()
+    ).assign(
+        answer=(
+            RunnablePassthrough.assign(context=lambda x: format_docs(x["context"]))
+            | prompt
+            | llm
+            | StrOutputParser()
+        )
     )
 
     return _CACHED_CHAIN
 
 
 def get_astro_answer(query_text):
-    """Główna funkcja wywoływana przez Streamlit."""
     chain = get_rag_chain()
 
-    # ZMIANA: Przekazujemy słownik, bo tego wymaga itemgetter w chainie
-    answer = chain.invoke({"question": query_text})
+    # Wywołujemy łańcuch
+    result = chain.invoke({"question": query_text})
 
-    # Pobieramy źródła (ponowne wyszukanie dla metadanych)
-    config = get_config()
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model=config["embedding_model"], google_api_key=config["google_api_key"]
-    )
-    vectorstore = Chroma(
-        persist_directory=config["chroma_path"], embedding_function=embeddings
-    )
-    # Szukamy dokumentów, aby wyciągnąć nazwy plików
-    docs = vectorstore.similarity_search(query_text, k=config["retrieval_k"])
-    sources = list(set([d.metadata.get("source", "Nieznany plik") for d in docs]))
+    answer = result["answer"]
+    raw_docs = result["context"]  # To są dokumenty znalezione przez retrievera
 
-    return {"answer": answer, "sources": sources}
+    # Wyciągamy szczegółowe źródła: Plik + Strona
+    detailed_sources = []
+    for doc in raw_docs:
+        source_name = doc.metadata.get("source", "Nieznany plik")
+        page_num = doc.metadata.get("page", "?")  # PyPDFLoader dodaje to domyślnie
 
+        # Tworzymy ładny opis fragmentu
+        source_info = f"📄 {source_name} (str. {page_num + 1})"  # +1 bo indeksuje od 0
+        if source_info not in detailed_sources:
+            detailed_sources.append(source_info)
 
-# Funkcja quick_chat zostaje bez zmian (używa już poprawnego słownika w stream)
+    return {
+        "answer": answer,
+        "sources": detailed_sources,
+        "raw_fragments": [
+            doc.page_content[:200] + "..." for doc in raw_docs
+        ],  # Opcjonalnie dla Kamila do debugowania
+    }
 
 
 def quick_chat():
-    print("\n🚀 AstroGuide (Gemini 1.5 Flash) - Test Mode")
-    print("Wpisz 'q' lub 'exit', aby zakończyć.")
-    print("-" * 50)
+    print("\n🚀 AstroGuide (Expert Mode) - Test bazy i źródeł")
+    print("Wpisz 'q', aby wyjść.")
+    print("-" * 60)
 
     try:
-        # 1. Pobieramy łańcuch (raz, dzięki cache w get_rag_chain)
         chain = get_rag_chain()
 
         while True:
             query = input("\nTy: ")
-            if query.lower() in ["q", "exit", "quit"]:
+            if query.lower() in ["q", "exit"]:
                 break
 
-            print("\nAstroGuide: ", end="", flush=True)
+            # 1. Wywołanie łańcucha (invoke zamiast stream dla łatwiejszego dostępu do słownika)
+            print("AstroGuide analizuje dokumentację...", end="\r")
+            result = chain.invoke({"question": query})
 
-            # 2. Streaming odpowiedzi (efekt pisania na żywo)
-            # Przekazujemy słownik zgodnie z definicją w LCEL
-            full_response = ""
-            for chunk in chain.stream({"question": query}):
-                # Jeśli używasz StrOutputParser() na końcu chaina, chunk to string
-                # Jeśli nie używasz, chunk to AIMessageChunk (wtedy: chunk.content)
-                content = chunk if isinstance(chunk, str) else chunk.content
-                print(content, end="", flush=True)
-                full_response += content
+            # 2. Wyświetlenie odpowiedzi
+            print(f"\nAstroGuide: {result['answer']}")
 
-            # 3. Dodatkowy krok dla Sonii i Kasi: Wyświetlenie źródeł
-            # Musimy ręcznie sprawdzić, co retriever podał jako kontekst
-            print("\n" + "." * 20)
-            try:
-                # Pobieramy źródła, żeby sprawdzić czy metadane z ingestion.py działają
-                ans_data = get_astro_answer(query)  # Wykorzystujemy wrapper ze źródłami
-                sources = ans_data.get("sources", [])
-                if sources:
-                    print(f"📚 Źródła: {', '.join(sources)}")
-                else:
-                    print("⚠️ Brak konkretnych źródeł w kontekście.")
-            except Exception as e:
-                print(f"DEBUG: Nie udało się pobrać źródeł: {e}")
+            # 3. Wyświetlenie szczegółowych źródeł (Metadane dla Sonii i Kamila)
+            print(f"\n{'=' * 20} ŹRÓDŁA (METADANE) {'=' * 20}")
 
-            print("-" * 50)
+            # 'context' zawiera listę obiektów Document znalezionych przez retrievera
+            raw_docs = result.get("context", [])
+
+            if not raw_docs:
+                print("⚠️ Brak fragmentów w kontekście (retriever nic nie znalazł).")
+            else:
+                seen_sources = set()
+                for i, doc in enumerate(raw_docs, 1):
+                    # Wyciągamy metadane dodane podczas Ingestion
+                    source_file = doc.metadata.get("source", "Nieznany plik")
+                    page_num = doc.metadata.get("page", 0) + 1  # +1 bo PDFy są od 0
+
+                    source_id = f"{source_file} (str. {page_num})"
+
+                    if source_id not in seen_sources:
+                        print(f"[{i}] {source_id}")
+                        # Opcjonalnie: wyświetl fragment tekstu dla Kamila (debugowanie promptu)
+                        # print(f"    Snippet: {doc.page_content[:100]}...")
+                        seen_sources.add(source_id)
+
+            print("-" * 60)
 
     except Exception as e:
-        print(f"❌ Błąd krytyczny: {e}")
+        print(f"❌ Błąd podczas rozmowy: {e}")
 
 
 if __name__ == "__main__":
