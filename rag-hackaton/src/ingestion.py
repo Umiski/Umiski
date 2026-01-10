@@ -4,8 +4,9 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import Chroma
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import OllamaEmbeddings
 
-from src.utils import get_config
+from utils import get_config
 
 
 def run_ingestion():
@@ -32,7 +33,7 @@ def run_ingestion():
     # SONIA: Możesz tu zmienić model embeddingów na nowszy/tańszy
     vectorstore = Chroma.from_documents(
         documents=chunks,
-        embedding=OpenAIEmbeddings(api_key=config["openai_api_key"]),
+        embedding = OllamaEmbeddings(model="nomic-embed-text"),
         persist_directory=config["chroma_path"],
     )
 
