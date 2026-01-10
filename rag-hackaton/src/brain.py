@@ -1,10 +1,10 @@
 import os
 from langchain_chroma import Chroma
 from langchain_community.chat_models import ChatOllama
-from langchain_community.embeddings import OllamaEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from langchain_ollama import OllamaEmbeddings
 
 # --- 1. KONFIGURACJA ŚCIEŻEK (Musi pasować do ingestion.py!) ---
 # Pobieramy ścieżkę do folderu, w którym jest ten plik (src)
@@ -12,7 +12,7 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Wychodzimy jeden poziom wyżej (do rag-hackaton)
 BASE_DIR = os.path.dirname(CURRENT_DIR)
 # Wskazujemy folder z bazą
-DB_PATH = os.path.join(BASE_DIR, "data", "chroma_db")
+DB_PATH = os.path.join(BASE_DIR, "chroma_db")
 
 # --- 2. KONFIGURACJA MODELI (Lokalne na Maca) ---
 # Ważne: Musi być ten sam model embeddingów co w ingestion!
