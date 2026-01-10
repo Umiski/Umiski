@@ -1,7 +1,10 @@
-langchain
+langchain==1.2.3
 langchain-openai
 langchain-community
 langchain-groq
+langchain-google-genai
+langchain-chroma
+langchain-text-splitters
 chromadb
 streamlit
 python-dotenv

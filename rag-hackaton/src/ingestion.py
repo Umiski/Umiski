@@ -1,8 +1,8 @@
 import os
-
+import shutil
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.vectorstores import Chroma
-from langchain_openai import OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain_google_genai import GoogleGenerativeAIEmbeddings  # ZMIANA
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.utils import get_config
@@ -10,54 +10,62 @@ from src.utils import get_config
 
 def run_ingestion():
     config = get_config()
+    print("🚀 Rozpoczynam Ingestion (Google Gemini Stack)...")
 
-    # 1. Ładowanie PDFów z folderu data/
+    if not config["google_api_key"]:
+        print("❌ BŁĄD: Brak klucza GOOGLE_API_KEY w pliku .env!")
+        return
+
+    # 1. Sprawdzenie folderów
+    if not os.path.exists(config["data_path"]):
+        os.makedirs(config["data_path"])
+        print(f"Stworzono folder {config['data_path']}. Wrzuć tam PDFy!")
+        return
+
+    # 2. Ładowanie PDFów
     documents = []
     for file in os.listdir(config["data_path"]):
         if file.endswith(".pdf"):
-            loader = PyPDFLoader(os.path.join(config["data_path"], file))
-            documents.extend(loader.load())
+            file_path = os.path.join(config["data_path"], file)
+            print(f"📄 Przetwarzam: {file}")
+            loader = PyPDFLoader(file_path)
+            docs = loader.load()
+            for doc in docs:
+                doc.metadata["source"] = file  # Dodaj nazwę pliku jako metadane
+            documents.extend(docs)
 
     if not documents:
-        print("Folder data/ jest pusty! Kasia musi tam wrzucić dokumenty NASA/ESA.")
+        print("❌ Folder data/ jest pusty.")
         return
 
-    # 2. Chunking - SONIA: Tutaj zmieniasz parametry (rozmiar fragmentów)
+    # 3. Chunking
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000, chunk_overlap=150, add_start_index=True
+        chunk_size=config["chunk_size"],  # Konfigurowalne
+        chunk_overlap=config["chunk_overlap"],  # Konfigurowalne
+        add_start_index=True,
     )
     chunks = text_splitter.split_documents(documents)
+    print(f"✂️  Pocięto na {len(chunks)} fragmentów.")
 
-    # 3. Wektoryzacja i zapis do ChromaDB
-    # SONIA: Możesz tu zmienić model embeddingów na nowszy/tańszy
-    vectorstore = Chroma.from_documents(
+    # 4. Reset starej bazy (bo zmieniamy OpenAI na Google)
+    if os.path.exists(config["chroma_path"]):
+        shutil.rmtree(config["chroma_path"])
+
+    # 5. Zapis do ChromaDB
+    print(f"☁️  Generowanie wektorów ({config['embedding_model']})...")
+
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model=config["embedding_model"], google_api_key=config["google_api_key"]
+    )
+
+    Chroma.from_documents(
         documents=chunks,
-        embedding=OpenAIEmbeddings(api_key=config["openai_api_key"]),
+        embedding=embeddings,
         persist_directory=config["chroma_path"],
     )
 
-    print(f"Sukces! Przetworzono {len(chunks)} fragmentów do bazy wektorowej.")
-
-
-def quick_chat():
-    """Funkcja do interaktywnego testowania bota w konsoli."""
-    print("\n🚀 AstroGuide CLI Test Mode (wpisz 'exit' aby wyjść)")
-    print("-" * 50)
-
-    while True:
-        user_input = input("Ty: ")
-        if user_input.lower() in ["exit", "quit", "q"]:
-            break
-
-        try:
-            # Używamy modelu Flash 2.5 - jest darmowy i najszybszy
-            answer = get_astro_answer(user_input)
-            print(f"\nAstroGuide: {answer}\n")
-            print("-" * 20)
-        except Exception as e:
-            print(f"❌ Błąd: {e}")
+    print(f"🎉 Sukces! Baza gotowa w: {config['chroma_path']}")
 
 
 if __name__ == "__main__":
     run_ingestion()
-    # quick_chat()
