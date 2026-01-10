@@ -1,7 +1,8 @@
 import os
 import shutil
-from langchain_community.document_loaders import PyPDFLoader
+
 from langchain_chroma import Chroma
+from langchain_community.document_loaders import PyPDFLoader
 from langchain_google_genai import GoogleGenerativeAIEmbeddings  # ZMIANA
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
