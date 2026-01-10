@@ -31,7 +31,7 @@ if prompt := st.chat_input("Ask about space law..."):
 
     with st.chat_message("assistant"):
         try:
-            response = chain.invoke({"question": prompt})
+            response = chain.invoke({prompt})
             st.markdown(response)
             st.session_state.messages.append({"role": "assistant", "content": response})
         except Exception as e:
