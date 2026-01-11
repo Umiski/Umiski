@@ -12,7 +12,25 @@ from langchain_groq import ChatGroq
 from src.utils import get_config
 
 _CACHED_CHAIN = None
+_VECTORSTORE = None
 use_groq = True  # Ustaw na False, aby używać modeli Google zamiast Groq
+
+
+def get_resources():
+    """Inicjalizuje i cache'uje bazę oraz embeddingi (Matematyczne serce)"""
+    global _VECTORSTORE
+    if _VECTORSTORE is not None:
+        return _VECTORSTORE
+
+    config = get_config()
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model=config["embedding_model"], google_api_key=config["google_api_key"]
+    )
+
+    _VECTORSTORE = Chroma(
+        persist_directory=config["chroma_path"], embedding_function=embeddings
+    )
+    return _VECTORSTORE
 
 
 def get_rag_chain():
@@ -43,7 +61,11 @@ def get_rag_chain():
             temperature=config["temperature"],
         )
     else:
-        llm = ChatGroq(model_name=config["llm_model"], temperature=0.1, max_tokens=1024)
+        llm = ChatGroq(
+            model_name=config["llm_model"],
+            temperature=config["temperature"],
+            max_tokens=1024,
+        )
 
     system_template = """Jesteś AstroGuide, ekspertem od prawa kosmicznego i regulacji.
     Odpowiadaj konkretnie na podstawie kontekstu. Jeśli nie ma informacji, powiedz to wprost.
@@ -75,81 +97,96 @@ def get_rag_chain():
 
 
 def get_astro_answer(query_text):
-    chain = get_rag_chain()
+    vectorstore = get_resources()  # Twoja zoptymalizowana baza
 
-    # Wywołujemy łańcuch
+    # 1. NAJPIERW: Matematyczna ocena trafności (Zadanie Wiktora)
+    docs_and_scores = vectorstore.similarity_search_with_relevance_scores(
+        query_text,
+        k=3,  # Sprawdzamy top 3 fragmenty
+    )
+
+    if not docs_and_scores:
+        return {
+            "answer": "Brak danych w bazie dokumentacji.",
+            "sources": [],
+            "confidence": 0,
+        }
+
+    # Obliczamy średnią pewność z pobranych fragmentów
+    scores = [max(0, int(score * 100)) for _, score in docs_and_scores]
+    mission_confidence = sum(scores) / len(scores)
+
+    # 2. GUARDRAIL: Blokada przy pewności < 60%
+    # if mission_confidence < 60:
+    #     return {
+    #         "answer": (
+    #             f"Przepraszam, ale moja pewność co do odpowiedzi wynosi tylko {mission_confidence:.1f}%. "
+    #             "To zbyt mało, aby udzielić rzetelnej porady technicznej. "
+    #             "Proszę, spróbuj sformułować pytanie inaczej lub sprawdź oficjalne wytyczne NASA/ESA."
+    #         ),
+    #         "sources": [],  # Nie podajemy źródeł, którym nie ufamy
+    #         "confidence": mission_confidence,
+    #     }
+
+    # 3. DOPIERO TERAZ: Jeśli matematyka się zgadza, pytamy LLM (Zadanie Kamila)
+    chain = get_rag_chain()
     result = chain.invoke({"question": query_text})
 
-    answer = result["answer"]
-    raw_docs = result["context"]  # To są dokumenty znalezione przez retrievera
-
-    # Wyciągamy szczegółowe źródła: Plik + Strona
     detailed_sources = []
-    for doc in raw_docs:
-        source_name = doc.metadata.get("source", "Nieznany plik")
-        page_num = doc.metadata.get("page", "?")  # PyPDFLoader dodaje to domyślnie
-
-        # Tworzymy ładny opis fragmentu
-        source_info = f"📄 {source_name} (str. {page_num + 1})"  # +1 bo indeksuje od 0
-        if source_info not in detailed_sources:
-            detailed_sources.append(source_info)
+    for doc, score in docs_and_scores:
+        name = doc.metadata.get("source", "Nieznany plik")
+        page = doc.metadata.get("page", 0) + 1
+        detailed_sources.append(
+            {"text": f"📄 {name} (str. {page})", "score": max(0, int(score * 100))}
+        )
 
     return {
-        "answer": answer,
+        "answer": result["answer"],
         "sources": detailed_sources,
-        "raw_fragments": [
-            doc.page_content[:200] + "..." for doc in raw_docs
-        ],  # Opcjonalnie dla Kamila do debugowania
+        "confidence": mission_confidence,
     }
 
 
 def quick_chat():
-    print("\n🚀 AstroGuide (Expert Mode) - Test bazy i źródeł")
-    print("Wpisz 'q', aby wyjść.")
+    print("\n🚀 ASTROGUIDE - EXPERT EVALUATION MODE")
+    print("Działasz jako: Lead Dev / Math Specialist (Wiktor)")
     print("-" * 60)
 
     try:
-        chain = get_rag_chain()
-
         while True:
             query = input("\nTy: ")
             if query.lower() in ["q", "exit"]:
                 break
 
-            # 1. Wywołanie łańcucha (invoke zamiast stream dla łatwiejszego dostępu do słownika)
-            print("AstroGuide analizuje dokumentację...", end="\r")
-            result = chain.invoke({"question": query})
+            print(
+                "Analizuję trajektorię zapytania i przeszukuję bazę wektorową...",
+                end="\r",
+            )
 
-            # 2. Wyświetlenie odpowiedzi
-            print(f"\nAstroGuide: {result['answer']}")
+            # Wywołujemy naszą rozszerzoną funkcję
+            data = get_astro_answer(query)
 
-            # 3. Wyświetlenie szczegółowych źródeł (Metadane dla Sonii i Kamila)
-            print(f"\n{'=' * 20} ŹRÓDŁA (METADANE) {'=' * 20}")
+            # Kolorowanie statusu w zależności od pewności (Math Evaluation)
+            status = (
+                "🟢 PEWNY"
+                if data["confidence"] > 80
+                else "🟡 ŚREDNI"
+                if data["confidence"] > 60
+                else "🔴 NIEPEWNY"
+            )
 
-            # 'context' zawiera listę obiektów Document znalezionych przez retrievera
-            raw_docs = result.get("context", [])
+            print(f"\nAstroGuide [{status} - {data['confidence']:.1f}%]:")
+            print(f"{data['answer']}")
 
-            if not raw_docs:
-                print("⚠️ Brak fragmentów w kontekście (retriever nic nie znalazł).")
-            else:
-                seen_sources = set()
-                for i, doc in enumerate(raw_docs, 1):
-                    # Wyciągamy metadane dodane podczas Ingestion
-                    source_file = doc.metadata.get("source", "Nieznany plik")
-                    page_num = doc.metadata.get("page", 0) + 1  # +1 bo PDFy są od 0
-
-                    source_id = f"{source_file} (str. {page_num})"
-
-                    if source_id not in seen_sources:
-                        print(f"[{i}] {source_id}")
-                        # Opcjonalnie: wyświetl fragment tekstu dla Kamila (debugowanie promptu)
-                        # print(f"    Snippet: {doc.page_content[:100]}...")
-                        seen_sources.add(source_id)
+            print(f"\n{'=' * 20} ANALIZA MATEMATYCZNA ŹRÓDEŁ {'=' * 20}")
+            for i, src in enumerate(data["sources"], 1):
+                # Wyświetlamy trafność każdego chunka
+                print(f"[{i}] {src['text']} | Trafność wektorowa: {src['score']}%")
 
             print("-" * 60)
 
     except Exception as e:
-        print(f"❌ Błąd podczas rozmowy: {e}")
+        print(f"❌ Błąd krytyczny systemu: {e}")
 
 
 if __name__ == "__main__":
