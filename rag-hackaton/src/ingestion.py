@@ -1,35 +1,38 @@
 import os
 import shutil
 
+from langchain_chroma import Chroma
+from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from tqdm import tqdm
 
-# ... (reszta importów)
+from src.utils import get_config
 
 
 def run_ingestion():
     config = get_config()
-    print("🚀 ASTROGUIDE: Budowanie bazy wiedzy...")
 
-    if not config["google_api_key"]:
-        print("❌ BŁĄD: Brak GOOGLE_API_KEY!")
-        return
+    # 1. Przygotowanie ścieżek
+    DATA_PATH = "data/"  # Tu wrzuć PDFy od NASA, ESA, UNOOSA
+    CHROMA_PATH = config["chroma_path"]
 
-    if not os.path.exists(config["data_path"]) or not os.listdir(config["data_path"]):
-        print(f"❌ Brak plików PDF w {config['data_path']}")
-        return
+    # Czyszczenie starej bazy, żeby nie dublować danych (ważne przy testach)
+    if os.path.exists(CHROMA_PATH):
+        print(f"🧹 Usuwanie starej bazy w {CHROMA_PATH}...")
+        shutil.rmtree(CHROMA_PATH)
 
-    # Inicjalizacja embeddingów raz
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004",
-        task_type="retrieval_document",
-        google_api_key=config["google_api_key"],
+    # 2. Ładowanie dokumentów (PDFy)
+    print("📂 Ładowanie dokumentów z folderu data/...")
+    loader = DirectoryLoader(
+        DATA_PATH, glob="**/*.pdf", loader_cls=PyPDFLoader, show_progress=True
     )
 
-    # Czyścimy starą bazę
-    if os.path.exists(config["chroma_path"]):
-        shutil.rmtree(config["chroma_path"])
-        print("🧹 Stara baza usunięta.")
+    raw_documents = loader.load()
+    print(f"✅ Załadowano {len(raw_documents)} stron dokumentacji.")
 
+    # 3. Podział tekstu na mniejsze fragmenty (Chunking)
+    # Rozmiar 1000 znaków z zakładką 200, żeby nie gubić kontekstu między fragmentami
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=config["chunk_size"],
         chunk_overlap=config["chunk_overlap"],
@@ -37,39 +40,39 @@ def run_ingestion():
         add_start_index=True,
     )
 
-    all_chunks = []
-    pdf_files = [f for f in os.listdir(config["data_path"]) if f.endswith(".pdf")]
+    print("✂️ Dzielenie dokumentów na fragmenty...")
+    chunks = text_splitter.split_documents(raw_documents)
+    print(f"✅ Utworzono {len(chunks)} fragmentów wiedzy.")
 
-    print(f"📄 Znaleziono {len(pdf_files)} dokumentów. Rozpoczynam przetwarzanie...")
-
-    for file in tqdm(pdf_files, desc="Przetwarzanie PDF"):
-        file_path = os.path.join(config["data_path"], file)
-        try:
-            loader = PyPDFLoader(file_path)
-            # Ładujemy i od razu tniemy plik
-            pages = loader.load()
-
-            # Dodatkowe czyszczenie metadanych
-            for page in pages:
-                page.metadata["source"] = file
-                # PyPDFLoader dodaje 'page', więc mamy to z automatu
-
-            chunks = text_splitter.split_documents(pages)
-            all_chunks.extend(chunks)
-        except Exception as e:
-            print(f"⚠️ Błąd przy pliku {file}: {e}")
-
-    # Zapis do Chroma z wymuszeniem Cosine Similarity
-    print(f"☁️  Indeksowanie {len(all_chunks)} fragmentów w ChromaDB...")
-
-    vectorstore = Chroma.from_documents(
-        documents=all_chunks,
-        embedding=embeddings,
-        persist_directory=config["chroma_path"],
-        collection_metadata={"hnsw:space": "cosine"},  # MUSI być spójne z brain.py
+    # 4. Inicjalizacja modelu Embeddingów (Google)
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model="models/text-embedding-004", google_api_key=config["google_api_key"]
     )
 
-    print(f"🎉 Misja zakończona sukcesem! Baza gotowa.")
+    # 5. Budowa i zapis bazy wektorowej ChromaDB
+    print(f"🚀 Budowanie bazy ChromaDB w {CHROMA_PATH}... (To może chwilę potrwać)")
+
+    # Przetwarzanie w paczkach (batching), aby uniknąć błędów API przy dużej ilości danych
+    vectorstore = Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory=CHROMA_PATH,
+        collection_metadata={"hnsw:space": "cosine"},  # Dopasowanie do brain.py
+    )
+
+    print("\n" + "=" * 30)
+    print("✅ INGESTION ZAKOŃCZONE SUKCESEM!")
+    print(f"Zindeksowano: {len(chunks)} fragmentów.")
+    print(f"Lokalizacja bazy: {CHROMA_PATH}")
+    print("=" * 30)
 
 
-# ...
+if __name__ == "__main__":
+    # Upewnij się, że folder data istnieje
+    if not os.path.exists("data"):
+        os.makedirs("data")
+        print(
+            "📁 Utworzono folder 'data/'. Wrzuć tam swoje pliki PDF i uruchom ponownie."
+        )
+    else:
+        run_ingestion()
