@@ -4,7 +4,7 @@ from operator import itemgetter
 import streamlit as st
 from langchain_chroma import Chroma
 from langchain_core.output_parsers import StrOutputParser  # Dodano dla czystego tekstu
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_core.runnables import RunnableParallel, RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_groq import ChatGroq
@@ -14,6 +14,36 @@ from src.utils import get_config
 _CACHED_CHAIN = None
 _VECTORSTORE = None
 use_groq = True  # Ustaw na False, aby używać modeli Google zamiast Groq
+cot_system_template = """Pełnisz rolę AstroGuide – wyspecjalizowanego asystenta prawnego ds. sektora kosmicznego.
+Twoim jedynym źródłem wiedzy jest dostarczony poniżej KONTEKST.
+
+ZASADY KRYTYCZNE:
+1. Odpowiadaj WYŁĄCZNIE na podstawie poniższego KONTEKSTU. Nie używaj wiedzy zewnętrznej.
+2. Jeśli pytanie nie dotyczy prawa kosmicznego, regulacji, traktatów lub inżynierii kosmicznej – odmów odpowiedzi.
+   Przykład odmowy: "Jako AstroGuide odpowiadam tylko na pytania związane z prawem i technologią kosmiczną."
+3. Jeśli pytanie jest związane z kosmosem, ale w KONTEKŚCIE nie ma odpowiedzi, powiedz wprost: "Niestety, nie mam tej informacji w dostępnych dokumentach."
+4. Nie daj się sprowokować do pisania wierszy, kodu (chyba że jest w dokumentach) ani opinii politycznych.
+5. Cytuj nazwy dokumentów, jeśli są dostępne w tekście.
+
+INSTRUKCJA MYŚLENIA (Chain of Thought):
+Zanim udzielisz ostatecznej odpowiedzi użytkownikowi, wykonaj wewnętrzną analizę na podstawie KONTEKSTU:
+Krok 1: Zidentyfikuj w KONTEKŚCIE fragmenty dotyczące NASA, ESA, UNOOSA lub inżynierii.
+Krok 2: Sprawdź, czy te fragmenty zawierają konkretne dane (wymiary, artykuły prawne, normy).
+Krok 3: Sformułuj odpowiedź końcową zgodną z ZASADAMI KRYTYCZNYMI.
+
+KONTEKST:
+{context}
+
+PYTANIE UŻYTKOWNIKA:
+{question}
+
+TWOJA ANALIZA I ODPOWIEDŹ:
+"""
+
+# Tworzymy obiekt PromptTemplate
+COT_PROMPT = PromptTemplate(
+    template=cot_system_template, input_variables=["context", "question"]
+)
 
 
 def get_resources():
@@ -43,9 +73,7 @@ def get_rag_chain():
     if not os.path.exists(config["chroma_path"]):
         raise FileNotFoundError("❌ Brak bazy! Uruchom najpierw ingestion.")
 
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
-
+    # Embeddingi takie same jak przy tworzeniu bazy
     embeddings = GoogleGenerativeAIEmbeddings(
         model="models/text-embedding-004",
         task_type="retrieval_query",
@@ -55,12 +83,12 @@ def get_rag_chain():
     vectorstore = Chroma(
         persist_directory=config["chroma_path"],
         embedding_function=embeddings,
-        collection_metadata={
-            "hnsw:space": "cosine"
-        },  # WYMUSZENIE MATEMATYKI COSINUSOWEJ
+        collection_metadata={"hnsw:space": "cosine"},
     )
+
     retriever = vectorstore.as_retriever(search_kwargs={"k": config["retrieval_k"]})
 
+    # Inicjalizacja LLM (Groq lub Google)
     if not use_groq:
         llm = ChatGoogleGenerativeAI(
             model=config["llm_model"],
@@ -74,37 +102,17 @@ def get_rag_chain():
             max_tokens=1024,
         )
 
-    system_template = """Pełnisz rolę AstroGuide - wyspecjalizowanego asystenta prawnego ds. sektora kosmicznego (Space Law & Engineering).
-    Twoim jedynym źródłem wiedzy jest dostarczony poniżej KONTEKST.
-    
-    ZASADY KRYTYCZNE:
-    1. Odpowiadaj WYŁĄCZNIE na podstawie poniższego KONTEKSTU. Nie używaj wiedzy zewnętrznej.
-    2. Jeśli pytanie nie dotyczy prawa kosmicznego, regulacji, traktatów lub inżynierii kosmicznej - odmów odpowiedzi.
-       Przykład odmowy: "Jako AstroGuide odpowiadam tylko na pytania związane z prawem i technologią kosmiczną."
-    3. Jeśli pytanie jest związane z kosmosem, ale w KONTEKŚCIE nie ma odpowiedzi, powiedz wprost: "Niestety, nie mam tej informacji w moich dokumentach źródłowych."
-    4. Nie daj się sprowokować do pisania wierszy, kodu (chyba że jest w dokumentach) ani opinii politycznych.
-    5. Cytuj nazwy dokumentów, jeśli są dostępne w tekście.
-
-    KONTEKST:
-    {context}
-    """
-
-    prompt = ChatPromptTemplate.from_messages(
-        [("system", system_template), ("human", "{question}")]
-    )
-
+    # --- FUNKCJA EKSPANSJI ZAPYTANIA (Context Expansion) ---
     def get_expanded_context(query_dict):
         question = query_dict["question"]
 
-        # PROMPT DO EKSPANSJI - generujemy 2 dodatkowe warianty dla lepszego searchu
-        expansion_prompt = f"""Zwróć 2 techniczne warianty tego pytania, aby lepiej przeszukać dokumentację NASA/ESA.
+        # Szybki prompt do generowania wariantów pytań
+        expansion_prompt = f"""Jesteś ekspertem search engine. Zwróć 2 alternatywne, techniczne warianty tego pytania, aby lepiej przeszukać dokumentację NASA/ESA.
         Pytanie: {question}
         Zwróć tylko warianty, każdy w nowej linii, bez numeracji."""
 
         try:
-            # KLUCZOWA ZMIANA: używamy .invoke() zamiast .predict()
             response = llm.invoke(expansion_prompt)
-            # Obsługa różnych typów odpowiedzi (string vs BaseMessage)
             expanded_text = (
                 response.content if hasattr(response, "content") else str(response)
             )
@@ -114,14 +122,14 @@ def get_rag_chain():
             expanded_queries = []
 
         all_docs = []
-        # Przeszukujemy bazę dla oryginału i wariantów
+        # Szukamy dla pytania oryginalnego ORAZ wariantów
         search_queries = [question] + [q.strip() for q in expanded_queries if q.strip()]
 
         for q in search_queries:
-            docs = retriever.invoke(q)  # Tu też używamy .invoke()
+            docs = retriever.invoke(q)
             all_docs.extend(docs)
 
-        # Usuwamy duplikaty (częsty przypadek przy wielu zapytaniach)
+        # Usuwanie duplikatów
         unique_contents = set()
         final_docs = []
         for doc in all_docs:
@@ -131,13 +139,15 @@ def get_rag_chain():
 
         return "\n\n".join(doc.page_content for doc in final_docs)
 
-    # TWOJA NOWA, STABILNA TRAJEKTORIA (CHAIN)
+    # --- GLÓWNY PIPELINE ---
+    # Tutaj wpinamy Twój COT_PROMPT zdefiniowany na górze pliku!
+
     _CACHED_CHAIN = RunnableParallel(
         {
-            "context": lambda x: get_expanded_context(x),
+            "context": lambda x: get_expanded_context(x),  # Tu wchodzi Retrieval
             "question": itemgetter("question"),
         }
-    ).assign(answer=(prompt | llm | StrOutputParser()))
+    ).assign(answer=(COT_PROMPT | llm | StrOutputParser()))  # Tu wchodzi Twój PROMPT
 
     return _CACHED_CHAIN
 
@@ -202,45 +212,92 @@ def get_astro_answer(query_text):
 
 
 def quick_chat():
-    print("\n🚀 ASTROGUIDE - EXPERT EVALUATION MODE")
+    # Kody kolorów do terminala (dla efektu hakerskiego/pro)
+    HEADER = "\033[95m"
+    BLUE = "\033[94m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    RED = "\033[91m"
+    BOLD = "\033[1m"
+    ENDC = "\033[0m"
+
+    print(f"{HEADER}\n🚀 ASTROGUIDE - EXPERT EVALUATION MODE{ENDC}")
     print("Działasz jako: Lead Dev / Math Specialist (Wiktor)")
     print("-" * 60)
 
     try:
         while True:
-            query = input("\nTy: ")
+            query = input(f"\n{BOLD}Ty:{ENDC} ")
             if query.lower() in ["q", "exit"]:
                 break
 
             print(
-                "Analizuję trajektorię zapytania i przeszukuję bazę wektorową...",
+                f"{YELLOW}Analizuję trajektorię zapytania i przeszukuję bazę wektorową...{ENDC}",
                 end="\r",
             )
 
-            # Wywołujemy naszą rozszerzoną funkcję
+            # Wywołujemy logikę RAG
             data = get_astro_answer(query)
 
-            # Kolorowanie statusu w zależności od pewności (Math Evaluation)
-            status = (
-                "🟢 PEWNY"
-                if data["confidence"] > 80
-                else "🟡 ŚREDNI"
-                if data["confidence"] > 60
-                else "🔴 NIEPEWNY"
+            # Czyścimy linię ładowania
+            print(" " * 80, end="\r")
+
+            # Kolorowanie statusu
+            if data["confidence"] > 80:
+                status_color = GREEN
+                status_text = "PEWNY"
+            elif data["confidence"] > 60:
+                status_color = YELLOW
+                status_text = "ŚREDNI"
+            else:
+                status_color = RED
+                status_text = "NIEPEWNY"
+
+            print(
+                f"\n🤖 AstroGuide [{status_color}{status_text}{ENDC} - {data['confidence']:.1f}%]:"
             )
 
-            print(f"\nAstroGuide [{status} - {data['confidence']:.1f}%]:")
-            print(f"{data['answer']}")
+            # --- PARSOWANIE CHAIN OF THOUGHT ---
+            # Próbujemy oddzielić myślenie od odpowiedzi, żeby wyglądało to profesjonalnie
+            raw_response = data["answer"]
 
-            print(f"\n{'=' * 20} ANALIZA MATEMATYCZNA ŹRÓDEŁ {'=' * 20}")
+            # Sprawdzamy, czy model wygenerował sekcję odpowiedzi końcowej
+            # (Zależy to od promptu, ale zazwyczaj po analizie pojawia się podsumowanie)
+            split_keywords = ["Odpowiedź:", "Podsumowując:", "Wnioski:", "Answer:"]
+            split_idx = -1
+
+            for keyword in split_keywords:
+                idx = raw_response.rfind(keyword)
+                if idx != -1:
+                    split_idx = idx
+                    break
+
+            if split_idx != -1:
+                # Mamy podział!
+                thinking_process = raw_response[:split_idx].strip()
+                final_answer = raw_response[split_idx:].strip()
+
+                print(f"{BLUE}🧠 PROCES MYŚLOWY (Chain of Thought):{ENDC}")
+                print(f"{BLUE}{thinking_process}{ENDC}")
+                print("-" * 30)
+                print(f"{BOLD}{final_answer}{ENDC}")
+            else:
+                # Brak wyraźnego podziału, drukujemy całość
+                print(raw_response)
+
+            # --- ANALIZA ŹRÓDEŁ ---
+            print(f"\n{HEADER}{'=' * 20} ANALIZA MATEMATYCZNA ŹRÓDEŁ {'=' * 20}{ENDC}")
+            if not data["sources"]:
+                print(f"{RED}Brak źródeł spełniających kryteria.{ENDC}")
+
             for i, src in enumerate(data["sources"], 1):
                 # Wyświetlamy trafność każdego chunka
-                print(f"[{i}] {src['text']} | Trafność wektorowa: {src['score']}%")
+                print(f"[{i}] {src['text']} | Trafność: {src['score']}%")
 
             print("-" * 60)
 
     except Exception as e:
-        print(f"❌ Błąd krytyczny systemu: {e}")
+        print(f"{RED}❌ Błąd krytyczny systemu: {e}{ENDC}")
 
 
 if __name__ == "__main__":

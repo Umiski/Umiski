@@ -23,4 +23,5 @@ def get_config():
         "chunk_overlap": int(os.getenv("CHUNK_OVERLAP", 200)),
         "retrieval_k": int(os.getenv("RETRIEVAL_K", 5)),
         "temperature": float(os.getenv("TEMPERATURE", 0)),
+        "judge_model": os.getenv("JUDGE_MODEL"),  # Model sędziego
     }

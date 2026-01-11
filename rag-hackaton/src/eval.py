@@ -6,7 +6,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
 
-# Importujemy Twój działający chain
 from src.brain import get_rag_chain
 from src.utils import get_config
 
@@ -130,7 +129,7 @@ def run_evaluation():
             faith_result = evaluate_faithfulness(answer, context_text)
             rel_result = evaluate_relevancy(q, answer)
 
-            print(f"   🤖 Odpowiedź: {answer[:80]}...")
+            print(f"   🤖 Odpowiedź: {answer}...")
             print(
                 f"   🛡️  Wierność: {faith_result['score']} -> {faith_result['reason']}"
             )
