@@ -56,7 +56,9 @@ def run_ingestion():
     print(f"☁️  Generowanie wektorów ({config['embedding_model']})...")
 
     embeddings = GoogleGenerativeAIEmbeddings(
-        model=config["embedding_model"], google_api_key=config["google_api_key"]
+        model="models/text-embedding-004",
+        task_type="retrieval_document",  # KLUCZOWE: model optymalizuje wektory pod długie teksty
+        google_api_key=config["google_api_key"],
     )
 
     Chroma.from_documents(

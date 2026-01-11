@@ -47,11 +47,17 @@ def get_rag_chain():
         return "\n\n".join(doc.page_content for doc in docs)
 
     embeddings = GoogleGenerativeAIEmbeddings(
-        model=config["embedding_model"], google_api_key=config["google_api_key"]
+        model="models/text-embedding-004",
+        task_type="retrieval_query",
+        google_api_key=config["google_api_key"],
     )
 
     vectorstore = Chroma(
-        persist_directory=config["chroma_path"], embedding_function=embeddings
+        persist_directory=config["chroma_path"],
+        embedding_function=embeddings,
+        collection_metadata={
+            "hnsw:space": "cosine"
+        },  # WYMUSZENIE MATEMATYKI COSINUSOWEJ
     )
     retriever = vectorstore.as_retriever(search_kwargs={"k": config["retrieval_k"]})
     if not use_groq:
@@ -102,7 +108,7 @@ def get_astro_answer(query_text):
     # 1. NAJPIERW: Matematyczna ocena trafności (Zadanie Wiktora)
     docs_and_scores = vectorstore.similarity_search_with_relevance_scores(
         query_text,
-        k=3,  # Sprawdzamy top 3 fragmenty
+        k=config["retrieval_k"],  # Sprawdzamy top 3 fragmenty
     )
 
     if not docs_and_scores:
