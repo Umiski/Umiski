@@ -60,6 +60,7 @@ def get_rag_chain():
         },  # WYMUSZENIE MATEMATYKI COSINUSOWEJ
     )
     retriever = vectorstore.as_retriever(search_kwargs={"k": config["retrieval_k"]})
+
     if not use_groq:
         llm = ChatGoogleGenerativeAI(
             model=config["llm_model"],
@@ -92,20 +93,51 @@ def get_rag_chain():
         [("system", system_template), ("human", "{question}")]
     )
 
-    # KLUCZOWA ZMIANA: Zapewniamy, że retriever dostaje tylko string (tekst pytania)
+    def get_expanded_context(query_dict):
+        question = query_dict["question"]
+
+        # PROMPT DO EKSPANSJI - generujemy 2 dodatkowe warianty dla lepszego searchu
+        expansion_prompt = f"""Zwróć 2 techniczne warianty tego pytania, aby lepiej przeszukać dokumentację NASA/ESA.
+        Pytanie: {question}
+        Zwróć tylko warianty, każdy w nowej linii, bez numeracji."""
+
+        try:
+            # KLUCZOWA ZMIANA: używamy .invoke() zamiast .predict()
+            response = llm.invoke(expansion_prompt)
+            # Obsługa różnych typów odpowiedzi (string vs BaseMessage)
+            expanded_text = (
+                response.content if hasattr(response, "content") else str(response)
+            )
+            expanded_queries = expanded_text.strip().split("\n")
+        except Exception as e:
+            print(f"⚠️ Problem z ekspansją: {e}")
+            expanded_queries = []
+
+        all_docs = []
+        # Przeszukujemy bazę dla oryginału i wariantów
+        search_queries = [question] + [q.strip() for q in expanded_queries if q.strip()]
+
+        for q in search_queries:
+            docs = retriever.invoke(q)  # Tu też używamy .invoke()
+            all_docs.extend(docs)
+
+        # Usuwamy duplikaty (częsty przypadek przy wielu zapytaniach)
+        unique_contents = set()
+        final_docs = []
+        for doc in all_docs:
+            if doc.page_content not in unique_contents:
+                unique_contents.add(doc.page_content)
+                final_docs.append(doc)
+
+        return "\n\n".join(doc.page_content for doc in final_docs)
+
+    # TWOJA NOWA, STABILNA TRAJEKTORIA (CHAIN)
     _CACHED_CHAIN = RunnableParallel(
         {
-            "context": itemgetter("question") | retriever,
+            "context": lambda x: get_expanded_context(x),
             "question": itemgetter("question"),
         }
-    ).assign(
-        answer=(
-            RunnablePassthrough.assign(context=lambda x: format_docs(x["context"]))
-            | prompt
-            | llm
-            | StrOutputParser()
-        )
-    )
+    ).assign(answer=(prompt | llm | StrOutputParser()))
 
     return _CACHED_CHAIN
 
