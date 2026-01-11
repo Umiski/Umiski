@@ -1,22 +1,19 @@
 import streamlit as st
-from src.brain import get_rag_chain
+from src.brain import get_astro_answer, get_rag_chain
 
 st.set_page_config(page_title="AstroGuide: Space Law Assistant", page_icon="🚀")
 
 st.title("🚀 AstroGuide: Space Law Assistant")
-st.markdown(
-    "Get expert answers on space law, regulations, and rules for startups and individuals launching into space."
-)
+st.markdown("Get expert answers on space law, regulations, and rules for startups and individuals launching into space.")
 
-# Initialize chain
+# (opcjonalnie) tylko żeby złapać błąd braku bazy na starcie
 try:
-    chain = get_rag_chain()
+    get_rag_chain()
     st.success("System ready! Ask your questions below.")
 except Exception as e:
     st.error(f"Error loading system: {e}")
     st.stop()
 
-# Chat interface
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -31,8 +28,18 @@ if prompt := st.chat_input("Ask about space law..."):
 
     with st.chat_message("assistant"):
         try:
-            response = chain.invoke({"question": prompt})
-            st.markdown(response)
-            st.session_state.messages.append({"role": "assistant", "content": response})
+            result = get_astro_answer(prompt)
+            answer = result["answer"].replace("\\n", "\n")
+
+            st.markdown(answer)
+
+            with st.expander("Sources"):
+                if result["sources"]:
+                    st.markdown("\n".join(f"- {s}" for s in result["sources"]))
+                else:
+                    st.write("No sources returned.")
+
+            st.session_state.messages.append({"role": "assistant", "content": answer})
+
         except Exception as e:
             st.error(f"Error: {e}")
