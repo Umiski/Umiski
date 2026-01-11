@@ -13,7 +13,7 @@ from src.utils import get_config
 
 _CACHED_CHAIN = None
 _VECTORSTORE = None
-use_groq = True  # Ustaw na False, aby używać modeli Google zamiast Groq
+use_groq = False  # Ustaw na False, aby używać modeli Google zamiast Groq
 
 
 def get_resources():
