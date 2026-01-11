@@ -1,74 +1,75 @@
 import os
 import shutil
 
-from langchain_chroma import Chroma
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_google_genai import GoogleGenerativeAIEmbeddings  # ZMIANA
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from tqdm import tqdm
 
-from src.utils import get_config
+# ... (reszta importów)
 
 
 def run_ingestion():
     config = get_config()
-    print("🚀 Rozpoczynam Ingestion (Google Gemini Stack)...")
+    print("🚀 ASTROGUIDE: Budowanie bazy wiedzy...")
 
     if not config["google_api_key"]:
-        print("❌ BŁĄD: Brak klucza GOOGLE_API_KEY w pliku .env!")
+        print("❌ BŁĄD: Brak GOOGLE_API_KEY!")
         return
 
-    # 1. Sprawdzenie folderów
-    if not os.path.exists(config["data_path"]):
-        os.makedirs(config["data_path"])
-        print(f"Stworzono folder {config['data_path']}. Wrzuć tam PDFy!")
+    if not os.path.exists(config["data_path"]) or not os.listdir(config["data_path"]):
+        print(f"❌ Brak plików PDF w {config['data_path']}")
         return
 
-    # 2. Ładowanie PDFów
-    documents = []
-    for file in os.listdir(config["data_path"]):
-        if file.endswith(".pdf"):
-            file_path = os.path.join(config["data_path"], file)
-            print(f"📄 Przetwarzam: {file}")
-            loader = PyPDFLoader(file_path)
-            docs = loader.load()
-            for doc in docs:
-                doc.metadata["source"] = file  # Dodaj nazwę pliku jako metadane
-            documents.extend(docs)
-
-    if not documents:
-        print("❌ Folder data/ jest pusty.")
-        return
-
-    # 3. Chunking
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=config["chunk_size"],  # Konfigurowalne
-        chunk_overlap=config["chunk_overlap"],  # Konfigurowalne
-        add_start_index=True,
-    )
-    chunks = text_splitter.split_documents(documents)
-    print(f"✂️  Pocięto na {len(chunks)} fragmentów.")
-
-    # 4. Reset starej bazy (bo zmieniamy OpenAI na Google)
-    if os.path.exists(config["chroma_path"]):
-        shutil.rmtree(config["chroma_path"])
-
-    # 5. Zapis do ChromaDB
-    print(f"☁️  Generowanie wektorów ({config['embedding_model']})...")
-
+    # Inicjalizacja embeddingów raz
     embeddings = GoogleGenerativeAIEmbeddings(
         model="models/text-embedding-004",
-        task_type="retrieval_document",  # KLUCZOWE: model optymalizuje wektory pod długie teksty
+        task_type="retrieval_document",
         google_api_key=config["google_api_key"],
     )
 
-    Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-        persist_directory=config["chroma_path"],
+    # Czyścimy starą bazę
+    if os.path.exists(config["chroma_path"]):
+        shutil.rmtree(config["chroma_path"])
+        print("🧹 Stara baza usunięta.")
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=config["chunk_size"],
+        chunk_overlap=config["chunk_overlap"],
+        length_function=len,
+        add_start_index=True,
     )
 
-    print(f"🎉 Sukces! Baza gotowa w: {config['chroma_path']}")
+    all_chunks = []
+    pdf_files = [f for f in os.listdir(config["data_path"]) if f.endswith(".pdf")]
+
+    print(f"📄 Znaleziono {len(pdf_files)} dokumentów. Rozpoczynam przetwarzanie...")
+
+    for file in tqdm(pdf_files, desc="Przetwarzanie PDF"):
+        file_path = os.path.join(config["data_path"], file)
+        try:
+            loader = PyPDFLoader(file_path)
+            # Ładujemy i od razu tniemy plik
+            pages = loader.load()
+
+            # Dodatkowe czyszczenie metadanych
+            for page in pages:
+                page.metadata["source"] = file
+                # PyPDFLoader dodaje 'page', więc mamy to z automatu
+
+            chunks = text_splitter.split_documents(pages)
+            all_chunks.extend(chunks)
+        except Exception as e:
+            print(f"⚠️ Błąd przy pliku {file}: {e}")
+
+    # Zapis do Chroma z wymuszeniem Cosine Similarity
+    print(f"☁️  Indeksowanie {len(all_chunks)} fragmentów w ChromaDB...")
+
+    vectorstore = Chroma.from_documents(
+        documents=all_chunks,
+        embedding=embeddings,
+        persist_directory=config["chroma_path"],
+        collection_metadata={"hnsw:space": "cosine"},  # MUSI być spójne z brain.py
+    )
+
+    print(f"🎉 Misja zakończona sukcesem! Baza gotowa.")
 
 
-if __name__ == "__main__":
-    run_ingestion()
+# ...
