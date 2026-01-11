@@ -108,7 +108,7 @@ def get_astro_answer(query_text):
     # 1. NAJPIERW: Matematyczna ocena trafności (Zadanie Wiktora)
     docs_and_scores = vectorstore.similarity_search_with_relevance_scores(
         query_text,
-        k=config["retrieval_k"],  # Sprawdzamy top 3 fragmenty
+        k=5,  # Sprawdzamy top 3 fragmenty
     )
 
     if not docs_and_scores:
