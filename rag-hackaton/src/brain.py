@@ -103,6 +103,14 @@ def get_rag_chain():
 
 
 def get_astro_answer(query_text):
+    def normalize_score(raw_score):
+        min_val = 0.1
+        max_val = 0.4
+
+        # Skalowanie do przedziału 0-1
+        scaled = (raw_score - min_val) / (max_val - min_val)
+        return max(0, min(100, int(scaled * 100)))
+
     vectorstore = get_resources()  # Twoja zoptymalizowana baza
 
     # 1. NAJPIERW: Matematyczna ocena trafności (Zadanie Wiktora)
@@ -119,7 +127,7 @@ def get_astro_answer(query_text):
         }
 
     # Obliczamy średnią pewność z pobranych fragmentów
-    scores = [max(0, int(score * 100)) for _, score in docs_and_scores]
+    scores = [max(0, int(normalize_score(score))) for _, score in docs_and_scores]
     mission_confidence = sum(scores) / len(scores)
 
     # 2. GUARDRAIL: Blokada przy pewności < 60%
