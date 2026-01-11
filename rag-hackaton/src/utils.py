@@ -1,4 +1,5 @@
 import os
+
 from dotenv import load_dotenv
 
 
@@ -13,7 +14,7 @@ def get_config():
         "chroma_path": os.path.join(BASE_DIR, "data", "chroma_db"),
         "data_path": os.path.join(BASE_DIR, "data"),
         # Modele Google
-        "llm_model": os.getenv("LLM_MODEL", "gemini-1.5-flash"),  # Szybki model
+        "llm_model": os.getenv("LLM_MODEL"),  # Szybki model
         "embedding_model": os.getenv(
             "EMBEDDING_MODEL", "models/text-embedding-004"
         ),  # Embeddingi

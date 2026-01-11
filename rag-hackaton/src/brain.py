@@ -7,10 +7,12 @@ from langchain_core.output_parsers import StrOutputParser  # Dodano dla czystego
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableParallel, RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_groq import ChatGroq
 
 from src.utils import get_config
 
 _CACHED_CHAIN = None
+use_groq = True  # Ustaw na False, aby używać modeli Google zamiast Groq
 
 
 def get_rag_chain():
@@ -34,12 +36,14 @@ def get_rag_chain():
         persist_directory=config["chroma_path"], embedding_function=embeddings
     )
     retriever = vectorstore.as_retriever(search_kwargs={"k": config["retrieval_k"]})
-
-    llm = ChatGoogleGenerativeAI(
-        model=config["llm_model"],
-        google_api_key=config["google_api_key"],
-        temperature=config["temperature"],
-    )
+    if not use_groq:
+        llm = ChatGoogleGenerativeAI(
+            model=config["llm_model"],
+            google_api_key=config["google_api_key"],
+            temperature=config["temperature"],
+        )
+    else:
+        llm = ChatGroq(model_name=config["llm_model"], temperature=0.1, max_tokens=1024)
 
     system_template = """Jesteś AstroGuide, ekspertem od prawa kosmicznego i regulacji.
     Odpowiadaj konkretnie na podstawie kontekstu. Jeśli nie ma informacji, powiedz to wprost.
