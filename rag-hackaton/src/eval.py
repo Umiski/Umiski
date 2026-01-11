@@ -1,25 +1,30 @@
-import os
 import json
+import os
 import re
-from langchain_groq import ChatGroq
-from langchain_core.prompts import ChatPromptTemplate
+
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_groq import ChatGroq
+
+# Importujemy Twój działający chain
 from src.brain import get_rag_chain
 from src.utils import get_config
 
 # 1. Konfiguracja Sędziego (Groq)
-# Używamy tego samego modelu co w brain.py, ale z temperaturą 0 dla powtarzalności ocen.
 config = get_config()
+
+# Pobieramy klucz API (z env lub configu)
+api_key = os.getenv("GROQ_API_KEY") or config.get("groq_api_key")
+
 judge_llm = ChatGroq(
-    model_name=config["llm_model"],  # Np. llama3-70b-8192
-    temperature=0,
-    api_key=os.getenv("GROQ_API_KEY"),
+    model_name=config["judge_model"],  # Llama 3 jest świetna do bycia sędzią
+    temperature=0,  # Zero kreatywności, sama logika
+    api_key=api_key,
 )
 
 
 def extract_json_from_text(text):
-    """Extract JSON from text that may contain additional content"""
-    # Look for JSON-like structure
+    """Wyciąga JSON nawet jak model doda coś od siebie."""
     json_pattern = r"\{.*\}"
     match = re.search(json_pattern, text, re.DOTALL)
     if match:
@@ -28,59 +33,57 @@ def extract_json_from_text(text):
         except json.JSONDecodeError:
             pass
 
-    # Try to find score and reason separately
+    # Fallback: szukanie ręczne
     score_match = re.search(r'"score"\s*:\s*([01])', text)
     reason_match = re.search(r'"reason"\s*:\s*"([^"]*)"', text)
 
     if score_match and reason_match:
         return {"score": int(score_match.group(1)), "reason": reason_match.group(1)}
 
-    # Fallback
-    return {"score": 0, "reason": "Failed to parse response"}
+    return {"score": 0, "reason": "Błąd parsowania odpowiedzi sędziego"}
 
 
 def evaluate_faithfulness(answer, context_text):
     """
-    Sprawdza Wierność (Faithfulness): Czy odpowiedź wynika TYLKO z dostarczonych dokumentów?
-    Chroni przed halucynacjami (zmyślaniem faktów).
+    Sprawdza Wierność: Czy odpowiedź wynika z kontekstu?
     """
     prompt = ChatPromptTemplate.from_template("""
-    Jesteś surowym sędzią AI. Oceniasz "Wierność" (Faithfulness) odpowiedzi systemu RAG.
+    Jesteś surowym sędzią AI. Oceniasz "Wierność" (Faithfulness).
 
-    KONTEKST (Źródła wiedzy):
+    KONTEKST:
     {context}
 
     ODPOWIEDŹ SYSTEMU:
     {answer}
 
-    Zadanie: Przeanalizuj czy odpowiedź wynika TYLKO z kontekstu. Jeśli zawiera informacje spoza kontekstu, daj 0. Jeśli wszystko jest oparte na kontekście, daj 1.
+    Zadanie: Czy odpowiedź wynika TYLKO z kontekstu? 
+    1 = TAK (Wszystko jest w tekście)
+    0 = NIE (Model zmyśla lub używa wiedzy zewnętrznej)
 
-    Odpowiedz WYŁĄCZNIE w formacie JSON, bez żadnego dodatkowego tekstu:
-    {{"score": <0 lub 1>, "reason": "<krótki powód>"}}
+    Odpowiedz WYŁĄCZNIE w JSON: {{"score": <0 lub 1>, "reason": "<krótki powód>"}}
     """)
 
     chain = prompt | judge_llm | StrOutputParser()
+    # Tutaj context_text jest już stringiem, więc przekazujemy go bezpośrednio
     raw_response = chain.invoke({"answer": answer, "context": context_text})
     return extract_json_from_text(raw_response)
 
 
 def evaluate_relevancy(question, answer):
     """
-    Sprawdza Trafność (Relevancy): Czy odpowiedź faktycznie odpowiada na zadane pytanie?
+    Sprawdza Trafność: Czy odpowiedź jest na temat?
     """
     prompt = ChatPromptTemplate.from_template("""
-    Jesteś surowym sędzią AI. Oceniasz "Trafność" (Answer Relevancy).
+    Jesteś surowym sędzią AI. Oceniasz "Trafność" (Relevancy).
 
-    PYTANIE UŻYTKOWNIKA:
-    {question}
+    PYTANIE: {question}
+    ODPOWIEDŹ: {answer}
 
-    ODPOWIEDŹ SYSTEMU:
-    {answer}
+    Zadanie: Czy to jest odpowiedź na zadane pytanie?
+    1 = TAK
+    0 = NIE
 
-    Zadanie: Oceń czy odpowiedź jest na temat pytania. Daj 1 jeśli odpowiedź dotyczy pytania, 0 jeśli nie.
-
-    Odpowiedz WYŁĄCZNIE w formacie JSON, bez żadnego dodatkowego tekstu:
-    {{"score": <0 lub 1>, "reason": "<krótki powód>"}}
+    Odpowiedz WYŁĄCZNIE w JSON: {{"score": <0 lub 1>, "reason": "<krótki powód>"}}
     """)
 
     chain = prompt | judge_llm | StrOutputParser()
@@ -92,7 +95,7 @@ def run_evaluation():
     print("\n🚀 START EWALUACJI (Sędzia: Groq/Llama3)")
     print("-" * 50)
 
-    # Zestaw pytań testowych ("Golden Dataset")
+    # Zestaw pytań testowych
     test_questions = [
         "Czym jest obiekt kosmiczny w świetle prawa?",
         "Kto odpowiada za szkody wyrządzone przez satelitę na Ziemi?",
@@ -104,56 +107,50 @@ def run_evaluation():
 
     total_faithfulness = 0
     total_relevancy = 0
-    results_log = []
 
     for q in test_questions:
         print(f"🔍 Pytanie: {q}")
 
-        # 2. Uruchomienie RAG (Twojego Braina)
-        # UWAGA: brain.py wymaga klucza "question", nie "input"
-        response = rag_chain.invoke({"question": q})
-
-        answer = response["answer"]
-        # Wyciągamy tekst z dokumentów źródłowych (context)
-        context_docs = response["context"]
-        context_text = "\n\n".join([doc.page_content for doc in context_docs])
-
-        # 3. Ocena Sędziego
         try:
+            # 2. Uruchomienie Twojego Braina
+            response = rag_chain.invoke({"question": q})
+
+            answer = response["answer"]
+
+            # --- KLUCZOWA POPRAWKA DLA CIEBIE ---
+            # Twój brain.py zwraca "context" jako string (tekst), a nie listę.
+            # Więc po prostu go przypisujemy.
+            context_text = response["context"]
+
+            # Zabezpieczenie na wypadek pustego kontekstu
+            if not context_text:
+                context_text = "Brak kontekstu (pusty string)."
+
+            # 3. Ocena Sędziego
             faith_result = evaluate_faithfulness(answer, context_text)
             rel_result = evaluate_relevancy(q, answer)
 
-            # Logowanie wyników
             print(f"   🤖 Odpowiedź: {answer[:80]}...")
             print(
-                f"   🛡️  Wierność (Faithfulness): {faith_result['score']} -> {faith_result['reason']}"
+                f"   🛡️  Wierność: {faith_result['score']} -> {faith_result['reason']}"
             )
-            print(
-                f"   🎯 Trafność (Relevancy):    {rel_result['score']} -> {rel_result['reason']}"
-            )
+            print(f"   🎯 Trafność: {rel_result['score']} -> {rel_result['reason']}")
 
             total_faithfulness += faith_result["score"]
             total_relevancy += rel_result["score"]
 
         except Exception as e:
-            print(f"   ⚠️ Błąd oceny dla tego pytania: {e}")
+            print(f"   ⚠️ Błąd oceny: {e}")
 
         print("-" * 50)
 
-    # 4. Raport Końcowy
-    avg_faith = total_faithfulness / len(test_questions)
-    avg_rel = total_relevancy / len(test_questions)
+    # 4. Raport
+    avg_faith = total_faithfulness / len(test_questions) if test_questions else 0
+    avg_rel = total_relevancy / len(test_questions) if test_questions else 0
 
     print("\n📊 RAPORT KOŃCOWY:")
     print(f"Średnia Wierność: {avg_faith:.2f} / 1.0")
     print(f"Średnia Trafność: {avg_rel:.2f} / 1.0")
-
-    if avg_faith < 0.8:
-        print(
-            "⚠️ SUGESTIA: Model halucynuje. Zwiększ 'temperature' na 0 lub popraw Prompt Systemowy w brain.py."
-        )
-    if avg_rel < 0.8:
-        print("⚠️ SUGESTIA: Model nie odpowiada wprost. Sprawdź retrieval_k w utils.py.")
 
 
 if __name__ == "__main__":
